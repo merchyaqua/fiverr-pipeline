@@ -1,0 +1,208 @@
+13:18 Tackling files portion first. Exploring GUI way and more native way. Frustration: seems to be no clear documentation or an API. Looking through the forum would be a lot of effort. "Ableton Live Set Export" seems to be the closest official thing. Try to find out more without requesting access. Only example is AKAI project -> Ableton project conversion, signalling overkill. Wondering why they aren't making it as open. Might even switch DAWs for simple recording purposes.
+Potentially unzip gzip into XML and look for audio file names.
+
+13:30 Yes, XML works. Found some path names. Thinking that you could just regex to insert an audio clip with source at the fixed path.
+
+Decoding one audio track to spot the difference with and without a clip from my dump folder.
+Difficulty: seems to be a lot of small values in the structure. Read through to glean useful things.
+Test if I modify the path, the audio file will be different i.e. that is the ultimate source to change/add an audio clip.
+Hypothesis: <AudioTrack> has <Clip>s and each <Clip> has a path.
+
+From the top-level, there seems to be lots of settings data e.g.
+
+
+These values don't mean anything to me right now because they'll be parsed by the program. This is like pacman protocol where you can represent states with 4-bit numbers instead of ASCII strings.
+
+
+What exactlfy is LOM and lom ids?
+
+One AudioTrack we actually care about.
+AudioTrack DeviceChain MainSequencer Sample ArrangerAutomation Events AudioClip SampleRef
+
+
+
+13:49 This would be the only thing we would have to insert/change. All these file names, …
+I wonder if it says corrupted if some information is missing, e.g. lastModDate, DefaultDuration, or they have good error catching to fill in those values. 
+13:59 That failed, said it was corrupt, could be the compression mechanism back into als.
+Yes, using gzip in the windows options solved it. Now test the missing info again. Seems to have lived, and did not go back to re-update that information. Might break something later on, but not sure.
+
+14:02 The real deal here is to change the path and see if it works. Test data: "D:\_MusicMaking\Ableton related files\Projects\Gigs\dump\Back of skoolbus.mp3"
+14:14 it did switch the track. However, the length of the track is a few bars and extending it just repeated it - it's the defaultDUration messing, I'm guessing. Manually adjusting the length is possible, but this works. 
+Plopping in a File Path does insert the audio. This means we have a pipeline from Audio File to ALS file:
+
+
+decompress :: .als -> .xml --using gzip
+genSampleRef :: Path -> String --get the bits to replace, see right for example.
+modifyAudioSource:: String -> .xml -> .xml --replace the bits actually
+compress :: .xml -> .als --also using gzip
+
+
+(Okay, I had my first xml plough through, next time this can be AI reading long files.)
+
+
+Next time: actually write those functions integrating gzip. Might even be a bash script, but I don't seem to have - oh, python has a gzip module. Looked up 'cygwin' and what is this massive OS module I don't currently need to know.
+
+
+11:24 Wrote compression.py, just a gzip interface. 
+Somehow it overwrote the file with empty. Um. BadGzipFile just cuz I replaced it with the other one lol.
+It says corrupt. Probably compression level. Will find out by trial and error -there are only 9. 6 or 9 apparently https://superuser.com/questions/269936/how-do-i-know-the-gzip-compression-level
+Somehow it doesn't matter, even in read. Going back to the windows compressor. It's 6 for sure though.
+
+Copilot suggested return the decoded string instead of just str of it. I think it's because in print, it converts it to a readable format anyway. But it did have lots of \r and \ts, so maybe that was a sign. Anyway.
+
+
+
+
+So… 11.55, working. Now try overwriting without error.
+Then try overwriting with nyc "D:\_MusicMaking\Ableton related files\Projects\Saturday Night\nyc Project\nyc.als"
+It opens fine, just says media files are missing, probably due to the relative paths. Automatic search got them all there.
+
+Now, deal with the XML. 
+15:55 starting to write XML Path to select the audiotrack by name. Actually, if we're hardcoding a template, we can leave it as is to find the first track there is. That's how it's laid out in there.
+Why is tostring so ugly to look at
+Plan: go straight to find every bit where the file context needs changing. Change it to your new path. Give your string back.
+
+
+Lots of tags have empty values in the return and mixer tracks for sourcecontext. Just a value tag.
+
+
+Not sure what that means.
+
+Aha, conveniently fileref is duplicated here. Not sure  what each one does though.
+Commenting out sourcecontext. Show in browser and show in explorer both work fine. Still curious whether it modifies when the program is opened. Nope! Wondering if unofficial docs come into play here.
+
+https://news.ycombinator.com/item?id=20984951 Good to know that others hate how it is around ableton. Wondering if I could explore Reaper, if it fits my mode of thinking. You know how people do cool code music things. Maybe an open source DAW would suit me. New term of the day: Open Sound Control (OSC) - like extended midi. Makes me think about how everything is just people trying to make things work and created protocols like these, not there being some existing idea like how protons exist (though that's just a theory as well!). Also, imagining I'm doing the cipher challenge and reading weird Wiki pages. Makes it more bearable to not think "nobody uses this".
+"Wait, OSC is like networking (and mqtt)?" this thought sent tingles down my legs.
+
+So, just generate the fileRef. You can probably work out the relative path from in/out paths.
+But let's try to replace Path first. What happens when RelativePath doesn't match Path?
+17:37 Not having relpath no one cared. Let's try to strip it down to just path.
+It does not care. The audio plays fine. I suspect it's just for analysis. To test this, turn off analysis files in the settings and create a new project. Add one audio clip and inspect xml.
+
+However, this will suffice.
+All we need to do is change the path value as an attribute in the xml. That's what the code does.
+Make that happen in the code.
+
+17:24 try to get this code to replace the value
+Doesn't seem to do it. Suspect not saved, not the assigning that's the issue.
+
+Chatgpt helped me spot that there was actually all the relative paths things 
+
+17:55 it doesn't open correctly. Oops.might be the bytestring, it was encoded as unicode after replacing.
+
+18:01: Honey that aint a bytestring
+
+
+
+Let's just make sure all the bytes and strings line up.
+Text. Encoded as utf-8 when in bytes.
+
+ get_xml_text(path)
+
+
+11:22 Might be more straightforward to directly open the file as a monolith document inside the python script.
+	Hypotheses:
+	- Faster
+	- Less memory usage
+	- More coherent
+	- More gzip dependent 
+	- Less python dependent in the file handling
+11:28 Looking at the documentation to see if you can parse from bytes. Trying XMLParser - oh no that's very custom like maxdepth counter really going through the tree.
+root = ET.fromstring(country_data_as_string) feels easier.
+Looks like it's better to go through having a unicode string first, then encode as utf-8.
+Uncommenting line by line to add in the replacemenbt.
+Not the same once it went through ET.
+
+
+
+Yeah it didn't write that first line. Should be more robust to changes if I write a full file then compress it.
+Oh xml declaration it's called. It;s a parameter.
+
+And it removed the comments ok of course.
+And so it can be opened.
+
+Now adding back in the ET operations.
+
+There WE GO.
+You still have to turn off loop for some reason. Just set it in the template manually.
+
+Well now it doesn't do anything.
+Wait why do I have to decompress the .als to open the inner .als for the correct file??? Is there some sort of fallback versioning?
+Might be a namespace problem, hmm. Since I said project twice.
+Just why is there a compressed file inside a compressed file.
+Theory: it relies on relative path first, then use Path. I set the RelativePathType value to 0, probably means null.
+Now it works. Now I'll un-loop it etc
+Looks like the complete removal of relative path value worked.
+
+
+
+17:08 Monday At this point, the naming is getting messy. If we continue to find small bugs like these, it wouldn't be so robust.
+
+However this will suffice. Let's just test in-place replacement. Making a copy of norelpath as the "best template".
+Maybe we won't need intermediate file - or maybe we do ? Cuz we can't wb and rb at the same time. A string in memory works too, though. That's my theory.
+
+We're getting closer to audiofilepath and project file path out being the only input parameters here.
+
+Functions writing was useful to plan out the steps, but it's so imperative in nature when we're automating something like this.
+Why write functions that won't be reused anyway? When there's not that much. Just 50 lines of code. Used shutil example from the gzip docs for intermediate file.
+
+Just say, if, Claude Code gets this right the first try. I would not have wrestled with any of these. Wouldn't have my thinking proved wrong.
+It saves you all the mistakes. Careless mistakes, sure. But ALL the mistakes. It's more than autocorrect and more than grammarly.
+
+10:07 Screw the optimisation bits.
+Goal now is to have the template be copied and opened?? Subprocess let's go.
+Eventually an easier file selection mechanism maybe GUI would make it easier to use.
+10:21 filedialog bit of code copied and commented out for now.
+Os.startfile works.
+One important optimisation is to adjust the length to match the full length of the audio there. For max flexibility it would insert a whole audio track - default tracks are a thing….
+"C:\Users\merch\Documents\Ableton\User Library\Defaults\Creating Tracks\Audio Track\Default Audio Track.als"
+
+
+10:28 Now we can move on to downloading the file itself.
+https://github.com/slmnsh/fiverr-api/blob/main/src/main.py
+Kind of a faff to start up a whole uvicorn instance? Also old - 2021 so structures might have changed
+
+10:42 Hodor creds: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJmaXZlcnIvaG9kb3JfcGVnYXN1cyIsInVpZCI6MTMzODU3MjQ3LCJzaWQiOiI5NDA3Mzk3MjJiY2YwY2RiM2U5N2JlOTJjOWNkZjMxMyIsImlhdCI6MTc0Njk4Nzg4MiwiZXhwIjoxNzc4NTQ1NDgyfQ.octP39ET-qFid4QMoeE6VBfTSPhHxgohxAQFt1XVSXU
+Don't know if this would change.
+
+Actually what I want is to be on the page and auto download the file. That would mean a browser extension.
+10:49: <a href="https://www.fiverr.com/download/attachment/message/694d3be00e379900127e53ef/694d3ad0ac1d0bddb55d7fa3/SpaceParty.mp3?order_id=FO5147741D741&amp;signature=4d1d73fe58888c34e0a9d38f66f12eda111781f929780b2ebf6716a2c19f6744" class="download-button m-r-8"><span>Download</span></a>
+
+Found loophole - just going to the file source doesn't need auth. So just pulling that from the page can probably download in the program.
+No API needed if that works. Otherwise, we'll have to do auth tokens like in that library.
+
+Pls automate exporting too
+
+
+=== AUTOMATION VISION ===
+Goal: one-click from receiving a Fiverr order to having the Ableton project open and ready to record.
+
+Pipeline:
+1. Scrape/download: pull the audio file from the Fiverr order page (either scrape the download link from the page source, or use auth token if needed)
+2. Organize: sort downloaded files into folders by client
+3. Inject into template: swap the audio path into the Ableton template .als (what monolith.py does now)
+4. Open: launch the output .als in Ableton, ready to record over
+
+Next steps toward this:
+- Remove hardcoded paths from monolith.py — use a config file for template/output paths, CLI argument for audio input
+- This keeps it automation-friendly: the Fiverr scraper can call the script with the downloaded audio path
+- Multiple tracks per order is a future consideration
+
+
+=== ITERATION 2: Auto-trigger pipeline ===
+Refactored monolith.py:
+- Core logic extracted into process_audio(audio_path, template_path, output_dir)
+- Config stored in config.json (template_path, output_dir, watch_dir) — created on first run, --set-* flags to update
+- Watchdog-based folder watcher (--watch mode) detects new audio files in dump folder, triggers pipeline
+- Manual mode still works: python monolith.py path/to/audio.mp3
+- Intermediate XML uses tempfile, old hardcoded paths and tkinter code removed
+- Output .als named after input audio (e.g. SpaceParty.als)
+- Tested and working end-to-end
+
+Status: watchdog + download flow works.
+
+Next iteration goals:
+- Instead of creating a NEW .als from template each time, inject into the EXISTING project .als that's already open
+- Add the downloaded audio as a NEW TRACK (new AudioTrack in the XML), not replacing the first one
+- Name the clip appropriately in the XML
+- This requires deeper XML editing: inserting a full AudioTrack element, assigning IDs, etc.
