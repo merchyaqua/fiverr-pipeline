@@ -9,6 +9,9 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 
+import pystray
+from PIL import Image
+
 # Source - https://stackoverflow.com/a
 # Posted by tomvodi, modified by community. See post 'Timeline' for change history
 # Retrieved 2026-01-15, License - CC BY-SA 4.0
@@ -23,8 +26,18 @@ REL_PATH_TYPE_XPATH = FILEREF_XPATH + "/RelativePathType"
 REL_PATH_XPATH = FILEREF_XPATH + "/RelativePath"
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".aif", ".aiff", ".ogg", ".m4a"}
+
+_icon = None  # tray icon instance, set in main()
+
+
+def notify(title, message):
+    if _icon is not None:
+        _icon.notify(message, title)
+    else:
+        print(f"[{title}] {message}")
 
 CONFIG_PROMPTS = {
     "template_path": "Path to template .als file: ",
@@ -169,12 +182,14 @@ def create_project(audio_path, template_project_dir, output_parent_dir):
     audio_path = os.path.abspath(audio_path)
     name = _audio_name(audio_path)
 
+    notify("Fiverr Pipeline", f"Creating new project for {name}...")
+
     project_dir = os.path.join(output_parent_dir, f"{name} Project")
     shutil.copytree(template_project_dir, project_dir)
 
     als_files = [f for f in os.listdir(project_dir) if f.endswith(".als")]
     if not als_files:
-        print(f"No .als file found in template project: {template_project_dir}")
+        notify("Error", f"No .als in template project: {template_project_dir}")
         return None
 
     old_als = os.path.join(project_dir, als_files[0])
@@ -184,13 +199,13 @@ def create_project(audio_path, template_project_dir, output_parent_dir):
     root = _read_als(new_als)
     track = root.find("./LiveSet/Tracks/AudioTrack")
     if track is None:
-        print("No AudioTrack in template")
+        notify("Error", "No AudioTrack in template")
         return None
 
     _patch_track_audio(track, audio_path.replace("\\", "/"), name)
     _write_als(root, new_als)
 
-    print(f"Created project: {project_dir}")
+    notify("Fiverr Pipeline", f"{name} Project ready")
     os.startfile(new_als)
     return new_als
 
@@ -245,7 +260,7 @@ def add_track(als_path, audio_path):
     tracks_elem.insert(insert_index, clone)
 
     _write_als(root, als_path)
-    print(f"Added track '{name}' to {als_path}")
+    notify("Fiverr Pipeline", f"Done — reopening in Ableton")
     os.startfile(als_path)
     return als_path
 
@@ -259,8 +274,7 @@ def wait_for_unlock(path, poll_interval=2):
                 return
         except PermissionError:
             if not warned:
-                print(f"File is locked: {path}")
-                print("Save & close Ableton to add track...")
+                notify("Close Ableton", "Save & close to add the track")
                 warned = True
             time.sleep(poll_interval)
 
@@ -286,18 +300,20 @@ def watch(watch_dir, template_project_dir, output_parent_dir):
             if os.path.splitext(event.src_path)[1].lower() not in AUDIO_EXTENSIONS:
                 return
             time.sleep(1)  # let the file finish writing
-            print(f"Detected: {event.src_path}")
+            name = _audio_name(event.src_path)
+            notify("Fiverr Pipeline", f"Detected: {name}")
             try:
                 audio_dir = os.path.dirname(event.src_path)
                 als_files = [f for f in os.listdir(audio_dir) if f.endswith(".als")]
                 if als_files:
                     als_path = os.path.join(audio_dir, als_files[0])
                     wait_for_unlock(als_path)
+                    notify("Fiverr Pipeline", f"Adding track to {os.path.basename(als_path)}...")
                     add_track(als_path, event.src_path)
                 else:
                     create_project(event.src_path, template_project_dir, output_parent_dir)
             except Exception as e:
-                print(f"Error processing {event.src_path}: {e}")
+                notify("Error", str(e))
 
     observer = Observer()
     observer.schedule(AudioHandler(), watch_dir, recursive=True)
@@ -350,6 +366,17 @@ def main():
 
     if args.watch:
         config = ensure_config(config, ["template_project_dir", "watch_dir"])
+
+        global _icon
+        image = Image.open(ICON_PATH)
+        _icon = pystray.Icon(
+            "Fiverr Pipeline",
+            image,
+            "Fiverr Pipeline",
+            menu=pystray.Menu(pystray.MenuItem("Quit", lambda icon, item: icon.stop())),
+        )
+        _icon.run_detached()
+
         watch(config["watch_dir"], config["template_project_dir"], config["watch_dir"])
     elif args.audio:
         config = ensure_config(config, ["template_path", "output_dir"])
