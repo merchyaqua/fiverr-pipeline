@@ -299,6 +299,9 @@ def watch(watch_dir, template_project_dir, output_parent_dir):
                 return
             if os.path.splitext(event.src_path)[1].lower() not in AUDIO_EXTENSIONS:
                 return
+            # Ignore Ableton's own recorded/exported samples
+            if "Samples" in event.src_path.split(os.sep):
+                return
             time.sleep(1)  # let the file finish writing
             name = _audio_name(event.src_path)
             notify("Fiverr Pipeline", f"Detected: {name}")
