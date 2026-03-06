@@ -1,0 +1,83 @@
+<?xml version='1.0' encoding='us-ascii'?>
+<Ableton>
+<LiveSet>
+<NextPointeeId Value="100" />
+<Tracks>
+
+<AudioTrack Id="1">
+  <Name>
+    <EffectiveName Value="OrigTrack" />
+    <UserName Value="" />
+    <Annotation Value="" />
+    <MemorizedFirstClipName Value="OrigClip" />
+  </Name>
+  <DeviceChain>
+    <Mixer>
+      <On>
+        <AutomationTarget Id="10">
+          <LockEnvelope Value="0" />
+        </AutomationTarget>
+      </On>
+      <Pointee Id="11" />
+    </Mixer>
+    <MainSequencer>
+      <On>
+        <AutomationTarget Id="20">
+          <LockEnvelope Value="0" />
+        </AutomationTarget>
+      </On>
+      <Pointee Id="21" />
+      <Sample>
+        <ArrangerAutomation>
+          <Events>
+            <AudioClip Id="0" Time="0">
+              <Name Value="OrigClip" />
+              <SampleRef>
+                <FileRef>
+                  <Path Value="D:/original/audio.wav" />
+                  <RelativePathType Value="3" />
+                  <RelativePath Value="../../audio.wav" />
+                </FileRef>
+                <SourceContext>
+                  <SourceContext Id="50">
+                    <OriginalFileRef>
+                      <FileRef Id="51">
+                        <Path Value="D:/original/audio.wav" />
+                        <RelativePathType Value="3" />
+                        <RelativePath Value="../../audio.wav" />
+                      </FileRef>
+                    </OriginalFileRef>
+                  </SourceContext>
+                </SourceContext>
+              </SampleRef>
+            </AudioClip>
+          </Events>
+        </ArrangerAutomation>
+      </Sample>
+      <VolumeModulationTarget Id="30">
+        <LockEnvelope Value="0" />
+      </VolumeModulationTarget>
+    </MainSequencer>
+    <FreezeSequencer>
+      <On>
+        <AutomationTarget Id="40">
+          <LockEnvelope Value="0" />
+        </AutomationTarget>
+      </On>
+      <Pointee Id="41" />
+    </FreezeSequencer>
+  </DeviceChain>
+</AudioTrack>
+
+<ReturnTrack Id="2">
+  <Name>
+    <EffectiveName Value="A-Reverb" />
+    <UserName Value="" />
+    <Annotation Value="" />
+    <MemorizedFirstClipName Value="" />
+  </Name>
+</ReturnTrack>
+
+</Tracks>
+</LiveSet>
+</Ableton>

@@ -1,25 +1,42 @@
-import gzip
-import xml.etree.ElementTree as ET
-import os
-import sys
-import json
-import shutil
-import tempfile
 import argparse
+import copy
+import gzip
+import json
+import os
+import shutil
+import sys
+import tempfile
 import time
+import xml.etree.ElementTree as ET
 
 # Source - https://stackoverflow.com/a
 # Posted by tomvodi, modified by community. See post 'Timeline' for change history
 # Retrieved 2026-01-15, License - CC BY-SA 4.0
 
-XPATH = "./LiveSet/Tracks/AudioTrack/DeviceChain/MainSequencer/Sample/ArrangerAutomation/Events/AudioClip/SampleRef/FileRef/Path"
-REL_PATH_TYPE_XPATH = "./LiveSet/Tracks/AudioTrack/DeviceChain/MainSequencer/Sample/ArrangerAutomation/Events/AudioClip/SampleRef/FileRef/RelativePathType"
-REL_PATH_XPATH = "./LiveSet/Tracks/AudioTrack/DeviceChain/MainSequencer/Sample/ArrangerAutomation/Events/AudioClip/SampleRef/FileRef/RelativePath"
+FILEREF_XPATH = (
+    "./LiveSet/Tracks/AudioTrack"
+    "/DeviceChain/MainSequencer/Sample/ArrangerAutomation"
+    "/Events/AudioClip/SampleRef/FileRef"
+)
+XPATH = FILEREF_XPATH + "/Path"
+REL_PATH_TYPE_XPATH = FILEREF_XPATH + "/RelativePathType"
+REL_PATH_XPATH = FILEREF_XPATH + "/RelativePath"
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".aif", ".aiff", ".ogg", ".m4a"}
 
+CONFIG_PROMPTS = {
+    "template_path": "Path to template .als file: ",
+    "template_project_dir": "Path to template project directory: ",
+    "output_dir": "Output directory for generated .als files: ",
+    "watch_dir": "Watch directory (where audio files are downloaded): ",
+}
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 
 def load_config():
     if os.path.exists(CONFIG_PATH):
@@ -35,15 +52,10 @@ def save_config(config):
 
 def ensure_config(config, keys):
     """Prompt user for any missing config keys. Returns updated config."""
-    prompts = {
-        "template_path": "Path to template .als file: ",
-        "output_dir": "Output directory for generated .als files: ",
-        "watch_dir": "Watch directory (where audio files are downloaded): ",
-    }
     changed = False
     for key in keys:
         if key not in config or not config[key]:
-            value = input(prompts[key]).strip().strip('"').strip("'")
+            value = input(CONFIG_PROMPTS[key]).strip().strip('"').strip("'")
             config[key] = value
             changed = True
     if changed:
@@ -51,35 +63,19 @@ def ensure_config(config, keys):
     return config
 
 
-def process_audio(audio_path, template_path, output_dir):
-    """Replace the audio clip reference in the template .als and open the result in Ableton."""
-    audio_path = os.path.abspath(audio_path)
-    # Use forward slashes for Ableton compatibility
-    audio_path_value = audio_path.replace("\\", "/")
+# ---------------------------------------------------------------------------
+# .als I/O helpers
+# ---------------------------------------------------------------------------
 
-    # Output .als named after the input audio
-    audio_name = os.path.splitext(os.path.basename(audio_path))[0]
-    output_path = os.path.join(output_dir, f"{audio_name}.als")
+def _read_als(als_path):
+    """Read a gzip-compressed .als file and return the XML root."""
+    with gzip.open(als_path, "rb") as f:
+        return ET.fromstring(f.read().decode("utf-8"))
 
-    with gzip.open(template_path, "rb") as project:
-        xml_bytes = project.read()
-        xml_string = xml_bytes.decode("utf-8")
-        root = ET.fromstring(xml_string)
 
-    path_tag = root.find(XPATH)
-    rel_path_type_tag = root.find(REL_PATH_TYPE_XPATH)
-    rel_path_tag = root.find(REL_PATH_XPATH)
-
-    if path_tag is None:
-        print("No audio clips in template")
-        return None
-
-    path_tag.set("Value", audio_path_value)
-    rel_path_type_tag.set("Value", "0")
-    rel_path_tag.set("Value", "")
-
+def _write_als(root, output_path):
+    """Write an XML root to a gzip-compressed .als file."""
     tree = ET.ElementTree(root)
-
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xml") as tmp:
         tmp_path = tmp.name
     try:
@@ -90,12 +86,190 @@ def process_audio(audio_path, template_path, output_dir):
     finally:
         os.unlink(tmp_path)
 
+
+def _audio_name(audio_path):
+    """Return the stem of an audio filename (no extension)."""
+    return os.path.splitext(os.path.basename(audio_path))[0]
+
+
+# ---------------------------------------------------------------------------
+# XML patching helpers
+# ---------------------------------------------------------------------------
+
+def _patch_fileref(fileref, audio_path_value):
+    """Overwrite Path, RelativePathType, and RelativePath in a single FileRef element."""
+    for tag, val in [("Path", audio_path_value),
+                     ("RelativePathType", "0"),
+                     ("RelativePath", "")]:
+        elem = fileref.find(tag)
+        if elem is not None:
+            elem.set("Value", val)
+
+
+def _patch_track_audio(track, audio_path_value, name):
+    """Patch a single AudioTrack's file reference, track name, and clip name."""
+    clip = track.find(
+        "DeviceChain/MainSequencer/Sample/ArrangerAutomation/Events/AudioClip"
+    )
+    if clip is None:
+        return
+
+    # Patch ALL FileRef elements (main SampleRef + OriginalFileRef in SourceContext)
+    for fileref in clip.iter("FileRef"):
+        _patch_fileref(fileref, audio_path_value)
+
+    clip_name = clip.find("Name")
+    if clip_name is not None:
+        clip_name.set("Value", name)
+
+    name_elem = track.find("Name")
+    if name_elem is not None:
+        for tag in ("EffectiveName", "MemorizedFirstClipName"):
+            child = name_elem.find(tag)
+            if child is not None:
+                child.set("Value", name)
+
+
+def _remap_ids(element, next_id):
+    """Remap all Id attributes in element and its descendants. Returns new next_id."""
+    if "Id" in element.attrib:
+        element.set("Id", str(next_id))
+        next_id += 1
+    for child in element:
+        next_id = _remap_ids(child, next_id)
+    return next_id
+
+
+# ---------------------------------------------------------------------------
+# Core operations
+# ---------------------------------------------------------------------------
+
+def process_audio(audio_path, template_path, output_dir):
+    """Replace the audio clip reference in the template .als and open the result in Ableton."""
+    audio_path = os.path.abspath(audio_path)
+    name = _audio_name(audio_path)
+    output_path = os.path.join(output_dir, f"{name}.als")
+
+    root = _read_als(template_path)
+    track = root.find("./LiveSet/Tracks/AudioTrack")
+    if track is None:
+        print("No audio clips in template")
+        return None
+
+    _patch_track_audio(track, audio_path.replace("\\", "/"), name)
+    _write_als(root, output_path)
+
     print(f"Created: {output_path}")
     os.startfile(output_path)
     return output_path
 
 
-def watch(watch_dir, template_path, output_dir):
+def create_project(audio_path, template_project_dir, output_parent_dir):
+    """Create a new Ableton project folder from the template, patched with the given audio."""
+    audio_path = os.path.abspath(audio_path)
+    name = _audio_name(audio_path)
+
+    project_dir = os.path.join(output_parent_dir, f"{name} Project")
+    shutil.copytree(template_project_dir, project_dir)
+
+    als_files = [f for f in os.listdir(project_dir) if f.endswith(".als")]
+    if not als_files:
+        print(f"No .als file found in template project: {template_project_dir}")
+        return None
+
+    old_als = os.path.join(project_dir, als_files[0])
+    new_als = os.path.join(project_dir, f"{name}.als")
+    os.rename(old_als, new_als)
+
+    root = _read_als(new_als)
+    track = root.find("./LiveSet/Tracks/AudioTrack")
+    if track is None:
+        print("No AudioTrack in template")
+        return None
+
+    _patch_track_audio(track, audio_path.replace("\\", "/"), name)
+    _write_als(root, new_als)
+
+    print(f"Created project: {project_dir}")
+    os.startfile(new_als)
+    return new_als
+
+
+def add_track(als_path, audio_path):
+    """Add a new AudioTrack to an existing .als file, cloned from the first AudioTrack."""
+    audio_path = os.path.abspath(audio_path)
+    name = _audio_name(audio_path)
+
+    root = _read_als(als_path)
+    tracks_elem = root.find("./LiveSet/Tracks")
+    if tracks_elem is None:
+        print("No Tracks element in .als")
+        return None
+
+    first_audio_track = tracks_elem.find("AudioTrack")
+    if first_audio_track is None:
+        print("No AudioTrack to clone")
+        return None
+
+    max_track_id = max(
+        (int(t.get("Id")) for t in tracks_elem if t.get("Id") is not None),
+        default=0,
+    )
+
+    next_pointee_elem = root.find("./LiveSet/NextPointeeId")
+    next_id = int(next_pointee_elem.get("Value"))
+
+    clone = copy.deepcopy(first_audio_track)
+    clone.set("Id", str(max_track_id + 1))
+
+    # Strip extra AudioClips — keep only the first as a structural template
+    events = clone.find(
+        "DeviceChain/MainSequencer/Sample/ArrangerAutomation/Events"
+    )
+    if events is not None:
+        clips = events.findall("AudioClip")
+        for clip in clips[1:]:
+            events.remove(clip)
+
+    next_id = _remap_ids(clone, next_id)
+    next_pointee_elem.set("Value", str(next_id))
+
+    _patch_track_audio(clone, audio_path.replace("\\", "/"), name)
+
+    # Insert before first ReturnTrack (or at end)
+    insert_index = len(list(tracks_elem))
+    for i, child in enumerate(tracks_elem):
+        if child.tag == "ReturnTrack":
+            insert_index = i
+            break
+    tracks_elem.insert(insert_index, clone)
+
+    _write_als(root, als_path)
+    print(f"Added track '{name}' to {als_path}")
+    os.startfile(als_path)
+    return als_path
+
+
+def wait_for_unlock(path, poll_interval=2):
+    """Block until the file at path is not locked by another process."""
+    warned = False
+    while True:
+        try:
+            with open(path, "r+b"):
+                return
+        except PermissionError:
+            if not warned:
+                print(f"File is locked: {path}")
+                print("Save & close Ableton to add track...")
+                warned = True
+            time.sleep(poll_interval)
+
+
+# ---------------------------------------------------------------------------
+# Watcher
+# ---------------------------------------------------------------------------
+
+def watch(watch_dir, template_project_dir, output_parent_dir):
     """Watch a directory for new audio files using watchdog."""
     try:
         from watchdog.observers import Observer
@@ -109,19 +283,24 @@ def watch(watch_dir, template_path, output_dir):
         def on_created(self, event):
             if event.is_directory:
                 return
-            ext = os.path.splitext(event.src_path)[1].lower()
-            if ext not in AUDIO_EXTENSIONS:
+            if os.path.splitext(event.src_path)[1].lower() not in AUDIO_EXTENSIONS:
                 return
-            # Brief delay to let the file finish writing
-            time.sleep(1)
+            time.sleep(1)  # let the file finish writing
             print(f"Detected: {event.src_path}")
             try:
-                process_audio(event.src_path, template_path, output_dir)
+                audio_dir = os.path.dirname(event.src_path)
+                als_files = [f for f in os.listdir(audio_dir) if f.endswith(".als")]
+                if als_files:
+                    als_path = os.path.join(audio_dir, als_files[0])
+                    wait_for_unlock(als_path)
+                    add_track(als_path, event.src_path)
+                else:
+                    create_project(event.src_path, template_project_dir, output_parent_dir)
             except Exception as e:
                 print(f"Error processing {event.src_path}: {e}")
 
     observer = Observer()
-    observer.schedule(AudioHandler(), watch_dir, recursive=False)
+    observer.schedule(AudioHandler(), watch_dir, recursive=True)
     observer.start()
     print(f"Watching {watch_dir} for new audio files... (Ctrl+C to stop)")
     try:
@@ -132,41 +311,46 @@ def watch(watch_dir, template_path, output_dir):
     observer.join()
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def main():
     parser = argparse.ArgumentParser(description="Ableton audio clip pipeline")
     parser.add_argument("audio", nargs="?", help="Path to audio file (manual mode)")
-    parser.add_argument("--watch", action="store_true", help="Watch dump folder for new audio files")
+    parser.add_argument("--watch", action="store_true", help="Watch for new audio files")
     parser.add_argument("--set-template", metavar="PATH", help="Set template .als path")
+    parser.add_argument("--set-template-project", metavar="PATH", help="Set template project directory")
     parser.add_argument("--set-output-dir", metavar="PATH", help="Set output directory")
     parser.add_argument("--set-watch-dir", metavar="PATH", help="Set watch directory")
     args = parser.parse_args()
 
     config = load_config()
 
-    # Handle --set-* flags
-    if args.set_template:
-        config["template_path"] = args.set_template
-        save_config(config)
-        print(f"template_path set to: {args.set_template}")
-    if args.set_output_dir:
-        config["output_dir"] = args.set_output_dir
-        save_config(config)
-        print(f"output_dir set to: {args.set_output_dir}")
-    if args.set_watch_dir:
-        config["watch_dir"] = args.set_watch_dir
-        save_config(config)
-        print(f"watch_dir set to: {args.set_watch_dir}")
+    setters = {
+        "set_template": "template_path",
+        "set_template_project": "template_project_dir",
+        "set_output_dir": "output_dir",
+        "set_watch_dir": "watch_dir",
+    }
+    any_set = False
+    for arg_name, config_key in setters.items():
+        value = getattr(args, arg_name)
+        if value:
+            config[config_key] = value
+            save_config(config)
+            print(f"{config_key} set to: {value}")
+            any_set = True
 
-    # If only --set-* flags were used, exit
     if not args.audio and not args.watch:
-        if args.set_template or args.set_output_dir or args.set_watch_dir:
+        if any_set:
             return
         parser.print_help()
         return
 
     if args.watch:
-        config = ensure_config(config, ["template_path", "output_dir", "watch_dir"])
-        watch(config["watch_dir"], config["template_path"], config["output_dir"])
+        config = ensure_config(config, ["template_project_dir", "watch_dir"])
+        watch(config["watch_dir"], config["template_project_dir"], config["watch_dir"])
     elif args.audio:
         config = ensure_config(config, ["template_path", "output_dir"])
         process_audio(args.audio, config["template_path"], config["output_dir"])
