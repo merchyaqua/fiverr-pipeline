@@ -6,6 +6,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import xml.etree.ElementTree as ET
 
@@ -293,30 +294,57 @@ def watch(watch_dir, template_project_dir, output_parent_dir):
         print("Install it with: pip install watchdog")
         sys.exit(1)
 
+    # Batch state: files collected per folder, pending timer per folder
+    batches = {}        # folder -> [audio_path, ...]
+    timers = {}         # folder -> threading.Timer
+    batch_lock = threading.Lock()
+    DEBOUNCE_SECS = 2.5
+
+    def process_batch(folder):
+        with batch_lock:
+            files = batches.pop(folder, [])
+            timers.pop(folder, None)
+        if not files:
+            return
+
+        names = ", ".join(_audio_name(f) for f in files)
+        notify("Fiverr Pipeline", f"Detected: {names}")
+
+        try:
+            als_files = [f for f in os.listdir(folder) if f.endswith(".als")]
+            if als_files:
+                als_path = os.path.join(folder, als_files[0])
+                wait_for_unlock(als_path)
+                notify("Fiverr Pipeline", f"Adding {len(files)} track(s) to {os.path.basename(als_path)}...")
+                for audio_path in files:
+                    add_track(als_path, audio_path)
+            else:
+                # First file creates the project, rest become additional tracks
+                als_path = create_project(files[0], template_project_dir, output_parent_dir)
+                if als_path and len(files) > 1:
+                    for audio_path in files[1:]:
+                        add_track(als_path, audio_path)
+        except Exception as e:
+            notify("Error", str(e))
+
     class AudioHandler(FileSystemEventHandler):
         def on_created(self, event):
             if event.is_directory:
                 return
             if os.path.splitext(event.src_path)[1].lower() not in AUDIO_EXTENSIONS:
                 return
-            # Ignore Ableton's own recorded/exported samples
             if "Samples" in event.src_path.split(os.sep):
                 return
-            time.sleep(1)  # let the file finish writing
-            name = _audio_name(event.src_path)
-            notify("Fiverr Pipeline", f"Detected: {name}")
-            try:
-                audio_dir = os.path.dirname(event.src_path)
-                als_files = [f for f in os.listdir(audio_dir) if f.endswith(".als")]
-                if als_files:
-                    als_path = os.path.join(audio_dir, als_files[0])
-                    wait_for_unlock(als_path)
-                    notify("Fiverr Pipeline", f"Adding track to {os.path.basename(als_path)}...")
-                    add_track(als_path, event.src_path)
-                else:
-                    create_project(event.src_path, template_project_dir, output_parent_dir)
-            except Exception as e:
-                notify("Error", str(e))
+
+            folder = os.path.dirname(event.src_path)
+            with batch_lock:
+                batches.setdefault(folder, []).append(event.src_path)
+                # Reset the debounce timer for this folder
+                if folder in timers:
+                    timers[folder].cancel()
+                t = threading.Timer(DEBOUNCE_SECS, process_batch, args=[folder])
+                timers[folder] = t
+                t.start()
 
     observer = Observer()
     observer.schedule(AudioHandler(), watch_dir, recursive=True)
