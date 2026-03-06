@@ -173,6 +173,20 @@ No API needed if that works. Otherwise, we'll have to do auth tokens like in tha
 
 Pls automate exporting too
 
+26/2
+tried claude code. initially lots of this browser watch stuff but decided to just have it download into folder.
+watchdog library vs server decision, went with the simplest.
+then it monitors dump folder for new file and opens template with backing track.
+then tried tote snare chorus and realised it doesn't open tote snare.als that i've been working on, so new feature was needed.
+To watch the directory just above an ALS. Claude implemented this with recursive watching of the gigs folder.
+Another annoying thing found was how in the case of fresh template, it made the als but not the actual project, got Claude to clone it.
+But i missed out on all the filesystem discovery which is the actual fun bit. And researching the library options. applying and accumulating my own judgement so that i can eventually be better tha nthe average smart LLM.
+But it did save lots of testing back and forth. From now on I think I will only ask it ... idek. It helps with planning I think, and ideation, and reflecting back.
+I did also spot the file read.
+Lots of feature explanation like explaining how the file open and close works, time lost on the translation of my ideas.
+Bugs also takes longer to find the root cause of, because i didn't write the logic. so would be best to know the logic, figure out the solution, get Claude to 
+do the editing. ALl while being on top of the thinking and design. Much like how I did Tetris, I think now that it's easier no copy and pasting needed, the more overuse occurs.
+ok, gonna stop lamenting what's gone.
 
 === AUTOMATION VISION ===
 Goal: one-click from receiving a Fiverr order to having the Ableton project open and ready to record.
@@ -206,3 +220,126 @@ Next iteration goals:
 - Add the downloaded audio as a NEW TRACK (new AudioTrack in the XML), not replacing the first one
 - Name the clip appropriately in the XML
 - This requires deeper XML editing: inserting a full AudioTrack element, assigning IDs, etc.
+
+
+=== 26 FEB: DESIGN SESSION — Project folders + track insertion ===
+
+Context: audio arrives from Fiverr either into dump/ (new gigs) or into an existing
+Project folder (gigs in progress). Need two modes: create a new project, or add to one.
+
+--- Decisions I made ---
+
+1. TWO-MODE WATCHER (my design)
+   Audio lands -> is there an .als in the same folder?
+     No  -> new gig. Clone a template PROJECT FOLDER, not just an .als.
+     Yes -> existing gig. Add the audio as a new track to that .als.
+   This came from how I actually work: new clients get a fresh project,
+   returning clients get tracks added to the project I already have open.
+
+2. PROPER PROJECT FOLDERS (my design)
+   Ableton expects a folder structure (Ableton Project Info/, Backup/, Samples/Recorded/).
+   Previously we were just spitting out loose .als files. I decided to keep a clean
+   template_project/ directory that gets cloned with shutil.copytree, then the .als
+   inside gets renamed and patched. This means Ableton treats it as a real project —
+   no more "save as" prompts or missing folder warnings.
+
+3. TEMPLATE PROJECT SETUP (my design)
+   Created template_project/ under one_track Project/ with:
+   - Ableton Project Info/AProject.ico (copied from existing project)
+   - Backup/ and Samples/Recorded/ (empty, Ableton expects these)
+   - template.als (the one-track template I built manually earlier)
+   New config key: template_project_dir.
+
+4. CONFIG FILE APPROACH (my design, from iteration 2)
+   config.json with template_path, template_project_dir, output_dir, watch_dir.
+   CLI --set-* flags to update. This was my call from the previous iteration to
+   keep paths out of the code and make it automation-friendly.
+
+5. WATCH_DIR SCOPE (my decision, debugged live)
+   Originally watch_dir pointed at Gigs/dump/. During testing I dropped a file into
+   Tote Snare Project/ and nothing happened — the watcher wasn't watching that far.
+   Changed watch_dir to Gigs/ (one level up) with recursive=True so it covers both
+   dump/ and any project subfolders.
+
+6. FILE LOCK POLLING (joint decision)
+   If Ableton has the .als open, it's locked on Windows. Need to wait for the user
+   to save and close before we can write to it. I decided on the polling approach —
+   Claude implemented wait_for_unlock() as a simple while loop with try/except
+   PermissionError and time.sleep(2). I considered whether this needed threading/
+   concurrency but it doesn't — we're waiting for a human to close Ableton, not
+   doing parallel computation.
+
+--- What Claude Code wrote ---
+
+- _read_als() / _write_als(): extracted gzip round-trip into reusable helpers
+  (I had this inline in process_audio already)
+- _patch_track_audio(): patches FileRef path + track name + clip name on a single
+  AudioTrack element. Key discovery: must patch ALL FileRef elements including the
+  OriginalFileRef inside SourceContext, or Ableton reads the old path from there.
+- _remap_ids(): recursively walks a cloned AudioTrack and reassigns every Id attribute
+  (AutomationTarget, ModulationTarget, Pointee, etc.) from NextPointeeId counter.
+  This prevents ID collisions when inserting the clone back into the document.
+- add_track(): deep-copies first AudioTrack, strips extra AudioClips (a track can have
+  multiple clips at different times — must keep only one as structural template),
+  remaps IDs, patches audio, inserts before first ReturnTrack.
+- create_project(): shutil.copytree the template folder, rename .als, patch, open.
+- Updated watcher to be recursive and use the two-mode logic above.
+- Test fixture XML moved to fixtures/template.xml, pytest autouse fixture for
+  mocking os.startfile. 22 tests.
+
+--- Bugs found during live testing ---
+
+1. Watcher not triggering: watch_dir too narrow (dump/ instead of Gigs/). My fix.
+2. Wrong audio in new track: Ableton was reading from OriginalFileRef (second FileRef
+   inside SourceContext) which we weren't patching. Found by inspecting decompressed
+   XML of Tote Snare.als. Claude's fix.
+3. Wrong audio STILL: first AudioTrack had multiple AudioClips (GT at bar 0, verse 2
+   at bar 208). Clone carried all clips, only first got patched. Fix: strip extra
+   clips from clone before patching. Found by inspecting Tote Snare XML together.
+
+--- Decision to roll back ---
+
+Rolled back Claude's commit to main (saved on branch backup/add-track-and-project).
+I want to write the implementation myself to actually learn Python properly — shutil,
+copy.deepcopy, ElementTree iteration, the lot. The design and architecture are mine;
+now I need to own the code too.
+
+
+=== 6 MARCH: DESKTOP LAUNCHER + NOTIFICATIONS + BUGFIXES ===
+
+--- Decided to restore working version ---
+Changed mind on rewriting — restored backup/add-track-and-project onto main.
+Would rather use the tool and build on it than rewrite features I already designed.
+
+--- Desktop launcher (my idea) ---
+Wanted a "cute little startup icon" — no terminal, just double-click and go.
+Claude made launch.vbs (hides the console window so nothing ugly pops up) and
+make_shortcut.py (creates the .lnk on the desktop with the Ableton icon).
+
+--- Notifications (my design) ---
+Problem: since the console is hidden, wait_for_unlock's print messages were
+invisible. Needed a way to know what the script is doing without a terminal.
+Decided on system tray icon + balloon tips — less intrusive than Windows toasts,
+auto-dismiss, comes from the tray icon itself.
+Planned out exactly which events get a bubble:
+  - Detected: <filename>
+  - Creating new project...
+  - <name> Project ready
+  - Adding track to <file>...
+  - Done — reopening in Ableton
+  - Close Ableton: Save & close to add the track
+  - Error: <message>
+Claude implemented using pystray (tray icon + run_detached()) and Pillow (load .ico).
+notify() helper falls back to print() if no tray icon (i.e. manual CLI mode).
+
+--- Bug: watcher triggering on recorded samples ---
+Dropped some recorded samples into a project folder and the watcher tried to
+create new projects from them. Ableton saves recordings to <Project>/Samples/Recorded/.
+Fix: skip any audio file whose path contains a "Samples" folder component.
+
+--- Bug: multiple files at once creating separate projects (my observation) ---
+Dropping several audio files at once fired a separate on_created for each,
+creating N projects instead of 1.
+Fix: debounce per folder — collect files for 2.5 seconds, reset timer on each
+new arrival, then process the whole batch together. First file creates the
+project, the rest become additional tracks. Notification names all files at once.
